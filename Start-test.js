@@ -11,7 +11,8 @@ let SystemState = {
     isLightOn: false,
     isMoving: false,
     isEmergency: false,
-    scenarioState: 'Idle'
+    scenarioState: 'Idle',
+    scenarioActive: false 
 }
 
 // Функция отправки 
@@ -30,18 +31,19 @@ function send(cmd, data1 = 0, data2 = 0) {
     for (let b of bytes) sum = (sum + b) & 0xFF;
     const lrc = (0 - sum) & 0xFF;
 
-    port.write(Buffer.from([...bytes, lrc]));
+    port.write(fer.from([...bytes, lrc]));
+    console.write()
     console.log(`Отправлено: ${[...bytes, lrc].map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}`);
 }
 
-function moveRight(speed = 500) {
+function moveRight(speed = 300) {
     console.log(`Движение вправо со скоростью: ${speed}`);
     hi = (speed >> 8) & 0xFF;
     lo = speed & 0xFF;
     send(0x02, hi, lo);
 }
 
-function moveLeft(speed = 500) {
+function moveLeft(speed = 300) {
     console.log(`Движение влево со скоростью: ${speed}`)
     hi = (speed >> 8) & 0xFF;
     lo = speed & 0xFF;
@@ -88,23 +90,24 @@ function updateSystemState(packet) {
 
     console.log(`Бит 6 (0x40): Красная кнопка = ${(status1 & 0x40) ? '1 (отпущена)' : '0 (нажата)'}`);
     console.log(`Бит 5 (0x20): Зеленая кнопка = ${(status1 & 0x20) ? '1 (отпущена)' : '0 (нажата)'}`);
-    console.log(`Бит 4 (0x10): Центральный датчик = ${(status1 & 0x10) ? '1 (открыт)' : '0 (закрыт)'}`);
-    console.log(`Бит 0 (0x01) байта 4: Правый датчик = ${(status2 & 0x01) ? '1 (открыт)' : '0 (закрыт)'}`);
-    console.log(`Бит 1 (0x02) байта 4: Левый датчик = ${(status2 & 0x02) ? '1 (открыт)' : '0 (закрыт)'}`);
+    console.log(`Бит 4 (0x10): Центральный датчик = ${(status1 & 0x10) ? '1 (каретка НАД датчиком)' : '0 (каретка НЕ над датчиком)'}`);
+    console.log(`Бит 0 (0x01) байта 4: Правый датчик = ${(status2 & 0x01) ? '1 (каретка НАД датчиком)' : '0 (каретка НЕ над датчиком)'}`);
+    console.log(`Бит 1 (0x02) байта 4: Левый датчик = ${(status2 & 0x02) ? '1 (каретка НАД датчиком)' : '0 (каретка НЕ над датчиком)'}`);
 
     const newState = {
-        isRedPressed: (status1 & 0x40) !== 0,     
-        isGreenPressed: (status1 & 0x20) === 0,  
-        isCenterSensor: (status1 & 0x10) === 0,    
-        isRightSensor: (status2 & 0x01) === 0,        
-        isLeftSensor: (status2 & 0x02) === 0,         
+        isRedPressed: (status1 & 0x40) !== 0,
+        isGreenPressed: (status1 & 0x20) === 0,
+        isCenterSensor: (status1 & 0x10) !== 0,
+        isRightSensor: (status2 & 0x01) !== 0,
+        isLeftSensor: (status2 & 0x02) !== 0,
         isLightOn: (status3 & 0x01) !== 0
     };
 
 
     showChanges(newState);
+    const prevState = { ...SystemState };
     Object.assign(SystemState, newState);
-    checkScenario();
+    checkScenario(prevState);
 }
 
 function showChanges(newState) {
@@ -153,13 +156,13 @@ function checkScenario() {
             }
             break;
 
-        case 'Moving':
+        case 'MovingToCenter':
             if (SystemState.isCenterSensor) {
                 console.log('Обнаружен центральный датчик!');
                 reachCenter();
             }
             if (SystemState.isRightSensor) {
-                console.log('Достигнут конец! Возвращение...');
+                console.log('Достигнут конец! Возвращение');
                 returnToStart();
             }
             break;
@@ -178,13 +181,14 @@ function startScenario() {
     console.log('1. Включаю лампу');
     console.log('2. Начинаю движение вправо');
 
-    SystemState.scenarioState = 'Moving';
+    SystemState.scenarioState = 'MovingToCenter';
+    SystemState.scenarioActive = true;
 
     turnLight(true);
 
     setTimeout(() => {
-        moveRight(500);
-    }, 1000);
+        moveRight(300);
+    }, 300);
 }
 
 function reachCenter() {
@@ -197,20 +201,25 @@ function reachCenter() {
 
     turnLight(false);
 
-    stopMovement();
+    setTimeout(() => {
+        stopMovement();
+    }, 100);
 
     setTimeout(() => {
-        moveLeft(1000);
-    }, 500);
+        moveLeft(300);
+    }, 100);
 }
 
 function returnToStart() {
     console.log('Возвращение в начало');
     SystemState.scenarioState = 'Returning';
-    stopMovement();
     setTimeout(() => {
-        moveLeft(500);
-    }, 500);
+        stopMovement();
+    }, 100);
+
+    setTimeout(() => {
+        moveLeft(300);
+    }, 300);
 }
 
 function scenarioComplete() {
@@ -235,5 +244,5 @@ port.on('open', () => {
 
     setInterval(() => {
         send(0x0B)
-    }, 3000);
+    }, 100);
 });
