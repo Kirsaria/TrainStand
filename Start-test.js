@@ -2,6 +2,10 @@ const { SerialPort } = require('serialport');
 
 const port = new SerialPort({ path: 'COM7', baudRate: 19200, parity: 'none', databits: 8, stopBits: 1 });
 let lastState = {};
+let scenarioTimeouts = []; 
+let lastScenarioStartTime = 0;
+const SCENARIO_COOLDOWN_MS = 1000;
+
 let SystemState = {
     isGreenPressed: false,
     isRedPressed: false,
@@ -12,11 +16,12 @@ let SystemState = {
     isMoving: false,
     isEmergency: false,
     scenarioState: 'Idle',
-    scenarioActive: false 
+    scenarioActive: false
 }
 
 // Функция отправки 
 function send(cmd, data1 = 0, data2 = 0) {
+    let bytes;
     if (cmd === 0x0E) {
         bytes = [0xDC, 0x04, cmd, data1, data2];
     }
@@ -31,22 +36,21 @@ function send(cmd, data1 = 0, data2 = 0) {
     for (let b of bytes) sum = (sum + b) & 0xFF;
     const lrc = (0 - sum) & 0xFF;
 
-    port.write(fer.from([...bytes, lrc]));
-    console.write()
+    port.write(Buffer.from([...bytes, lrc]));
     console.log(`Отправлено: ${[...bytes, lrc].map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}`);
 }
 
 function moveRight(speed = 300) {
     console.log(`Движение вправо со скоростью: ${speed}`);
-    hi = (speed >> 8) & 0xFF;
-    lo = speed & 0xFF;
+    const hi = (speed >> 8) & 0xFF;
+    const lo = speed & 0xFF;
     send(0x02, hi, lo);
 }
 
 function moveLeft(speed = 300) {
     console.log(`Движение влево со скоростью: ${speed}`)
-    hi = (speed >> 8) & 0xFF;
-    lo = speed & 0xFF;
+    const hi = (speed >> 8) & 0xFF;
+    const lo = speed & 0xFF;
     send(0x01, hi, lo);
 }
 
@@ -57,7 +61,27 @@ function turnLight(on) {
 
 function stopMovement() {
     console.log('Остановка движения');
-    send(0x21)
+    send(0x21);
+}
+
+function clearAllTimeouts() {
+    scenarioTimeouts.forEach(timeoutId => {
+        clearTimeout(timeoutId);
+    });
+    scenarioTimeouts = [];
+}
+
+function addTimeout(callback, delay) {
+    const timeoutId = setTimeout(() => {
+        const index = scenarioTimeouts.indexOf(timeoutId);
+        if (index > -1) {
+            scenarioTimeouts.splice(index, 1);
+        }
+        callback();
+    }, delay);
+    
+    scenarioTimeouts.push(timeoutId);
+    return timeoutId;
 }
 
 // Обработка ответов 
@@ -103,7 +127,6 @@ function updateSystemState(packet) {
         isLightOn: (status3 & 0x01) !== 0
     };
 
-
     showChanges(newState);
     const prevState = { ...SystemState };
     Object.assign(SystemState, newState);
@@ -142,15 +165,17 @@ function showChanges(newState) {
     lastState = { ...newState };
 }
 
-function checkScenario() {
+function checkScenario(prevState) {
     if (SystemState.isRedPressed) {
         emergencyStop();
         return;
     }
 
+    const greenButtonJustPressed = !prevState.isGreenPressed && SystemState.isGreenPressed;
+
     switch (SystemState.scenarioState) {
         case 'Idle':
-            if (SystemState.isGreenPressed) {
+            if (greenButtonJustPressed && !SystemState.scenarioActive) {
                 console.log('Зеленая кнопка НАЖАТА - запуск сценария');
                 startScenario();
             }
@@ -177,72 +202,107 @@ function checkScenario() {
 }
 
 function startScenario() {
+    const now = Date.now();
+    if (now - lastScenarioStartTime < SCENARIO_COOLDOWN_MS) {
+        console.log('Сценарий уже запущен, игнорирую нажатие');
+        return;
+    }
+    
+    lastScenarioStartTime = now;
+    
     console.log('\n === НАЧАЛО СЦЕНАРИЯ ===');
-    console.log('1. Включаю лампу');
-    console.log('2. Начинаю движение вправо');
-
     SystemState.scenarioState = 'MovingToCenter';
     SystemState.scenarioActive = true;
 
+    clearAllTimeouts();
+
     turnLight(true);
 
-    setTimeout(() => {
-        moveRight(300);
-    }, 300);
+    if (SystemState.isLeftSensor) {
+        console.log('Каретка на левом датчике - двигаю вправо');
+        addTimeout(() => moveRight(1000), 300);
+    } else if (SystemState.isRightSensor) {
+        console.log('Каретка на правом датчике - двигаю влево');
+        addTimeout(() => moveLeft(1000), 300);
+    } else if (SystemState.isCenterSensor) {
+        console.log('Каретка уже на центральном датчике');
+        addTimeout(() => reachCenter(), 100);
+    } else {
+        console.log('Каретка между датчиками - двигаю вправо');
+        addTimeout(() => moveRight(300), 300);
+    }
 }
 
 function reachCenter() {
     console.log('\nДОСТИГНУТА СЕРЕДИНА');
-    console.log('1. Выключаю лампу');
-    console.log('2. Останавливаюсь');
-    console.log('3. Возвращаюсь в начало');
-
     SystemState.scenarioState = 'Returning';
 
     turnLight(false);
 
-    setTimeout(() => {
+    addTimeout(() => {
         stopMovement();
-    }, 100);
-
-    setTimeout(() => {
-        moveLeft(300);
+        
+        addTimeout(() => {
+            if (SystemState.isLeftSensor === true) {
+                moveRight(300);
+            } else {
+                moveLeft(300);
+            }
+        }, 100);
     }, 100);
 }
 
 function returnToStart() {
     console.log('Возвращение в начало');
     SystemState.scenarioState = 'Returning';
-    setTimeout(() => {
-        stopMovement();
-    }, 100);
 
-    setTimeout(() => {
-        moveLeft(300);
-    }, 300);
+    addTimeout(() => {
+        stopMovement();
+        
+        addTimeout(() => {
+            if (SystemState.isLeftSensor === true) {
+                moveRight(300);
+            } else {
+                moveLeft(300);
+            }
+        }, 100);
+    }, 100);
 }
 
 function scenarioComplete() {
     console.log('\n=== СЦЕНАРИЙ ЗАВЕРШЁН ===');
-    console.log('1. Вернулся в начало');
-    console.log('2. Полностью остановился');
-    console.log('3. Готов к новому запуску\n');
-
     SystemState.scenarioState = 'Idle';
-    stopMovement();
+    SystemState.scenarioActive = false;
+    
+    addTimeout(() => {
+        stopMovement();
+    }, 50);
 }
 
 function emergencyStop() {
     console.log('Аварийный стоп');
     SystemState.scenarioState = 'Idle';
+    SystemState.scenarioActive = false;
+    
+    clearAllTimeouts();
     stopMovement();
     turnLight(false);
 }
+
+port.on('error', (err) => {
+    console.error('Ошибка порта:', err.message);
+    clearAllTimeouts();
+});
+
+port.on('close', () => {
+    console.log('Порт закрыт');
+    clearAllTimeouts();
+});
 
 port.on('open', () => {
     console.log('CONPASS подключен!');
 
     setInterval(() => {
         send(0x0B)
-    }, 100);
+    }, 300);
 });
