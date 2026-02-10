@@ -1,199 +1,292 @@
 const { SerialPort } = require('serialport');
+const readline = require('readline');
 
-const port = new SerialPort({ path: 'COM7', baudRate: 19200 });
-
-// Функция отправки
-function send(cmd, data1 = 0, data2 = 0) {
-  const bytes = (data1 || data2) ? 
-    [0xDC, 0x04, cmd, data1, data2] : 
-    [0xDC, 0x02, cmd];
-  
-  let sum = 0;
-  for (let b of bytes) sum = (sum + b) & 0xFF;
-  const lrc = (0 - sum) & 0xFF;
-  
-  port.write(Buffer.from([...bytes, lrc]));
-  console.log(`📤 Отправлено: ${[...bytes, lrc].map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}`);
-}
-
-// Переменные состояния
-let lastGreenButtonState = 0x00; // Байт 3 из предыдущего статуса
-let isMoving = false;
-let moveDirection = 'none'; // 'left', 'right', 'none'
-
-// Функция для движения до конца
-function moveToEnd(direction) {
-  if (isMoving) {
-    console.log('⚠️ Уже движемся, сначала останавливаем');
-    send(0x21); // Остановка
-    setTimeout(() => {
-      startMovingToEnd(direction);
-    }, 200);
-  } else {
-    startMovingToEnd(direction);
-  }
-}
-
-function startMovingToEnd(direction) {
-  const speed = 500; // Скорость движения
-  
-  if (direction === 'left') {
-    console.log('🚀 Движение влево до конца');
-    send(0x01, (speed >> 8) & 0xFF, speed & 0xFF);
-    moveDirection = 'left';
-  } else if (direction === 'right') {
-    console.log('🚀 Движение вправо до конца');
-    send(0x02, (speed >> 8) & 0xFF, speed & 0xFF);
-    moveDirection = 'right';
-  }
-  
-  isMoving = true;
-}
-
-// Обработка ответов
-let buffer = Buffer.alloc(0);
-port.on('data', (data) => {
-  buffer = Buffer.concat([buffer, data]);
-  
-  while (buffer.length >= 2 && buffer[0] === 0xDC) {
-    const length = buffer[1] + 2;
-    if (buffer.length >= length) {
-      const packet = buffer.slice(0, length);
-      console.log(`📥 Ответ: ${Array.from(packet).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ')}`);
-      
-      // Если это ответ на команду статуса (0x0B)
-      if (packet.length >= 6 && packet[2] === 0x0B) {
-        // Байт 3 - это packet[3] (т.к. packet[0]=0xDC, packet[1]=длина, packet[2]=команда)
-        const byte3 = packet[3];
-        
-        // Маска для зеленой кнопки: бит 5 (00100000 = 0x20)
-        const greenButtonMask = 0x20;
-        const currentGreenButtonState = byte3 & greenButtonMask;
-        const lastGreenButtonStateValue = lastGreenButtonState & greenButtonMask;
-        
-        console.log(`🔍 Байт 3: ${byte3.toString(2).padStart(8, '0')} (0x${byte3.toString(16).toUpperCase().padStart(2, '0')})`);
-        console.log(`🟢 Состояние зеленой кнопки: ${currentGreenButtonState ? 'НАЖАТА' : 'ОТПУЩЕНА'}`);
-        
-        // Проверяем нажатие зеленой кнопки (переход с 0 на 1 в бите 5)
-        if (currentGreenButtonState && !lastGreenButtonStateValue) {
-          console.log('🎯 Зеленая кнопка нажата!');
-          
-          // Определяем в какую сторону ехать
-          // Если сейчас движемся вправо или не движемся - едем влево
-          // Если движемся влево - едем вправо
-          const targetDirection = (moveDirection === 'left') ? 'right' : 'left';
-          
-          // Двигаемся до конца в выбранном направлении
-          moveToEnd(targetDirection);
-        }
-        
-        // Сохраняем состояние для следующего сравнения
-        lastGreenButtonState = byte3;
-        
-        // Проверяем концевики (возможно в других битах байта 3)
-        // Например, если бит 0 = концевик слева, бит 1 = концевик справа
-        const leftEndstop = byte3 & 0x01;
-        const rightEndstop = (byte3 >> 1) & 0x01;
-        
-        console.log(`🏁 Концевик слева: ${leftEndstop ? 'СРАБОТАЛ' : 'НЕ СРАБОТАЛ'}`);
-        console.log(`🏁 Концевик справа: ${rightEndstop ? 'СРАБОТАЛ' : 'НЕ СРАБОТАЛ'}`);
-        
-        // Автоматическая остановка при достижении концевика
-        if (isMoving) {
-          if (moveDirection === 'left' && leftEndstop) {
-            console.log('🛑 Достигнут концевик слева, останавливаемся');
-            send(0x21);
-            isMoving = false;
-            moveDirection = 'none';
-          } else if (moveDirection === 'right' && rightEndstop) {
-            console.log('🛑 Достигнут концевик справа, останавливаемся');
-            send(0x21);
-            isMoving = false;
-            moveDirection = 'none';
-          }
-        }
-      }
-      
-      buffer = buffer.slice(length);
-    } else {
-      break;
-    }
-  }
+// Конфигурация порта
+const port = new SerialPort({
+    path: 'COM7',
+    baudRate: 19200,
+    parity: 'none',
+    dataBits: 8,
+    stopBits: 1
 });
 
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+
+// Функция отправки команды
+function sendCommand(cmd, data1 = 0, data2 = 0) {
+    let bytes;
+    
+    if (data1 !== 0 || data2 !== 0) {
+        bytes = [0xDC, 0x04, cmd, data1, data2];
+    } else {
+        bytes = [0xDC, 0x02, cmd];
+    }
+    
+    // Рассчитываем LRC
+    let sum = 0;
+    for (let b of bytes) {
+        sum = (sum + b) & 0xFF;
+    }
+    const lrc = (0 - sum) & 0xFF;
+    
+    const packet = [...bytes, lrc];
+    port.write(Buffer.from(packet));
+    
+    console.log('\n📤 ОТПРАВЛЕНО:');
+    console.log('HEX:', packet.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '));
+    console.log('DEC:', packet.join(' '));
+    console.log(`CMD: 0x${cmd.toString(16).toUpperCase()} (${cmd})`);
+    if (data1 !== 0 || data2 !== 0) {
+        console.log(`Data1: 0x${data1.toString(16).toUpperCase()} (${data1})`);
+        console.log(`Data2: 0x${data2.toString(16).toUpperCase()} (${data2})`);
+    }
+    
+    return packet;
+}
+
+// Тестируем различные команды для лампы
+function testLampCommands() {
+    console.log('\n🔍 ТЕСТИРУЮ КОМАНДЫ ДЛЯ ЛАМПЫ:');
+    
+    // Попробуем разные команды из документации
+    const testCommands = [
+        { name: 'Команда 13 - Таймер X-RAY (1)', cmd: 0x0D, data1: 1, data2: 0 },
+        { name: 'Команда 13 - Таймер X-RAY (0)', cmd: 0x0D, data1: 0, data2: 0 },
+        { name: 'Команда 14 - Фонари (1)', cmd: 0x0E, data1: 1, data2: 0 },
+        { name: 'Команда 14 - Фонари (0)', cmd: 0x0E, data1: 0, data2: 0 },
+        { name: 'Команда 3 - Открыть шторку', cmd: 0x03, data1: 0, data2: 0 },
+        { name: 'Команда 4 - Закрыть шторку', cmd: 0x04, data1: 0, data2: 0 },
+        { name: 'Команда 12 - Настройки (без шторок)', cmd: 0x0C, data1: 0x81, data2: 0 },
+        { name: 'Команда 27 - Подтверждение', cmd: 0x1B, data1: 0, data2: 0 },
+    ];
+    
+    let index = 0;
+    
+    const sendNextCommand = () => {
+        if (index >= testCommands.length) {
+            console.log('\n✅ Все команды отправлены');
+            setTimeout(() => mainMenu(), 1000);
+            return;
+        }
+        
+        const test = testCommands[index];
+        console.log(`\n${index + 1}. ${test.name}`);
+        sendCommand(test.cmd, test.data1, test.data2);
+        
+        index++;
+        setTimeout(sendNextCommand, 2000);
+    };
+    
+    sendNextCommand();
+}
+
+// Запрос статуса
+function checkStatus() {
+    console.log('\n📊 ЗАПРОС СТАТУСА');
+    sendCommand(0x0B);
+}
+
+// Анализ статуса
+function parseStatus(packet) {
+    if (packet[2] !== 0x0B || packet.length < 8) return;
+    
+    const data1 = packet[3];  // DATA1
+    const data2 = packet[4];  // DATA2  
+    const data3 = packet[5];  // DATA3
+    const data4 = packet[6];  // DATA4
+    
+    console.log('\n📋 АНАЛИЗ СТАТУСА:');
+    console.log('DATA1 (байт 3):', data1.toString(2).padStart(8, '0'), `(0x${data1.toString(16).toUpperCase()})`);
+    console.log('DATA2 (байт 4):', data2.toString(2).padStart(8, '0'), `(0x${data2.toString(16).toUpperCase()})`);
+    console.log('DATA3 (байт 5):', data3.toString(2).padStart(8, '0'), `(0x${data3.toString(16).toUpperCase()})`);
+    console.log('DATA4 (байт 6):', data4.toString(2).padStart(8, '0'), `(0x${data4.toString(16).toUpperCase()})`);
+    
+    // Кнопки (по предыдущему коду)
+    const isRedPressed = (data3 & 0x02) !== 0;  // Бит 1: Кнопка СТОП на столе
+    const isGreenPressed = (data3 & 0x04) !== 0; // Бит 2: Кнопка СТОП на портале
+    
+    console.log('\n🎮 КНОПКИ:');
+    console.log(`Красная (стоп): ${isRedPressed ? 'НАЖАТА' : 'ОТПУЩЕНА'}`);
+    console.log(`Зеленая: ${isGreenPressed ? 'НАЖАТА' : 'ОТПУЩЕНА'}`);
+    
+    // Датчики
+    console.log('\n📡 ДАТЧИКИ:');
+    console.log(`Platform sensor 1 (бит 5): ${(data1 & 0x20) ? '1 (каретка НАД)' : '0 (каретка НЕ над)'}`);
+    console.log(`Platform sensor 2 (бит 6): ${(data1 & 0x40) ? '1 (каретка НАД)' : '0 (каретка НЕ над)'}`);
+    console.log(`Limit switch 2 (бит 1 DATA2): ${(data2 & 0x02) ? '1' : '0'}`);
+}
+
+// Тестирование с зеленой кнопкой
+function testWithGreenButton() {
+    console.log('\n🎯 ТЕСТ С ЗЕЛЕНОЙ КНОПКОЙ:');
+    console.log('1. Нажмите зеленую кнопку');
+    console.log('2. Смотрите статус системы');
+    console.log('3. Проверяем все биты статуса\n');
+    
+    let checkCount = 0;
+    const maxChecks = 20;
+    
+    const checkInterval = setInterval(() => {
+        checkStatus();
+        checkCount++;
+        
+        if (checkCount >= maxChecks) {
+            clearInterval(checkInterval);
+            console.log('\n✅ Тест завершен');
+            setTimeout(() => mainMenu(), 1000);
+        }
+    }, 500);
+    
+    // Остановка по команде
+    rl.question('\nНажмите Enter для остановки теста...', () => {
+        clearInterval(checkInterval);
+        console.log('Тест остановлен');
+        setTimeout(() => mainMenu(), 500);
+    });
+}
+
+// Основное меню
+function mainMenu() {
+    console.log('\n========================================');
+    console.log('     УПРАВЛЕНИЕ ЛАМПОЙ CONPASS');
+    console.log('========================================');
+    console.log('\n1 - Тест всех команд для лампы');
+    console.log('2 - Запрос статуса');
+    console.log('3 - Тест с зеленой кнопкой');
+    console.log('4 - Отправить свою команду');
+    console.log('5 - Проверить движение каретки');
+    console.log('exit - Выход');
+    console.log('\n========================================\n');
+    
+    rl.question('Выберите действие: ', (choice) => {
+        switch(choice.trim()) {
+            case '1':
+                testLampCommands();
+                break;
+            case '2':
+                checkStatus();
+                setTimeout(() => mainMenu(), 1500);
+                break;
+            case '3':
+                testWithGreenButton();
+                break;
+            case '4':
+                customCommand();
+                break;
+            case '5':
+                testCarriageMovement();
+                break;
+            case 'exit':
+                console.log('Выход...');
+                rl.close();
+                port.close();
+                return;
+            default:
+                console.log('Неверный выбор');
+                setTimeout(() => mainMenu(), 500);
+        }
+    });
+}
+
+// Отправка своей команды
+function customCommand() {
+    console.log('\n✏️  ОТПРАВКА СВОЕЙ КОМАНДЫ:');
+    console.log('Формат: команда data1 data2');
+    console.log('Пример: 14 1 0 - включить фонари');
+    console.log('Пример: 13 1 0 - включить таймер X-RAY\n');
+    
+    rl.question('Введите команду: ', (input) => {
+        const parts = input.trim().split(/\s+/);
+        if (parts.length >= 1) {
+            const cmd = parseInt(parts[0]);
+            const data1 = parts.length >= 2 ? parseInt(parts[1]) : 0;
+            const data2 = parts.length >= 3 ? parseInt(parts[2]) : 0;
+            
+            console.log(`Отправка: cmd=${cmd}, data1=${data1}, data2=${data2}`);
+            sendCommand(cmd, data1, data2);
+        }
+        setTimeout(() => mainMenu(), 1500);
+    });
+}
+
+// Тест движения каретки
+function testCarriageMovement() {
+    console.log('\n🚗 ТЕСТ ДВИЖЕНИЯ КАРЕТКИ:');
+    console.log('1. Движение влево (скорость 100)');
+    console.log('2. Движение вправо (скорость 100)');
+    console.log('3. Стоп');
+    console.log('4. Назад\n');
+    
+    rl.question('Выберите: ', (choice) => {
+        switch(choice.trim()) {
+            case '1':
+                console.log('Движение влево...');
+                sendCommand(0x01, 0x00, 100);
+                setTimeout(() => testCarriageMovement(), 1000);
+                break;
+            case '2':
+                console.log('Движение вправо...');
+                sendCommand(0x02, 0x00, 100);
+                setTimeout(() => testCarriageMovement(), 1000);
+                break;
+            case '3':
+                console.log('Стоп...');
+                sendCommand(0x21);
+                setTimeout(() => testCarriageMovement(), 1000);
+                break;
+            case '4':
+                mainMenu();
+                break;
+            default:
+                console.log('Неверный выбор');
+                setTimeout(() => testCarriageMovement(), 500);
+        }
+    });
+}
+
+// Обработка входящих данных
+let buffer = Buffer.alloc(0);
+
+port.on('data', (data) => {
+    buffer = Buffer.concat([buffer, data]);
+    
+    while (buffer.length >= 2 && buffer[0] === 0xDC) {
+        const length = buffer[1] + 2;
+        
+        if (buffer.length >= length) {
+            const packet = buffer.slice(0, length);
+            buffer = buffer.slice(length);
+            
+            console.log('\n📥 ОТВЕТ:');
+            console.log('HEX:', Array.from(packet).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '));
+            
+            // Анализируем команду
+            const cmd = packet[2];
+            console.log(`Команда: 0x${cmd.toString(16).toUpperCase()} (${cmd})`);
+            
+            if (cmd === 0x0B) {
+                parseStatus(packet);
+            }
+        } else {
+            break;
+        }
+    }
+});
+
+// Запуск
 port.on('open', () => {
-  console.log('✅ CONPASS подключен!');
-  
-  // Запускаем периодический опрос статуса для отслеживания кнопки
-  setInterval(() => {
-    send(0x0B); // Команда запроса статуса
-  }, 100); // Опрашиваем каждые 100 мс
-  
-  // Получаем аргументы командной строки
-  const args = process.argv.slice(2);
-  
-  if (args.length === 0) {
-    console.log('\nИспользование:');
-    console.log('  node script.js команда [параметры]');
-    console.log('\nПримеры:');
-    console.log('  node script.js status');
-    console.log('  node script.js left 500');
-    console.log('  node script.js right 300');
-    console.log('  node script.js stop');
-    console.log('  node script.shutter open');
-    console.log('  node script.shutter close');
-    console.log('\n🟢 Зеленая кнопка будет отслеживаться автоматически!');
+    console.log('✅ Порт COM7 открыт');
+    mainMenu();
+});
+
+port.on('error', (err) => {
+    console.error('❌ Ошибка:', err.message);
+});
+
+rl.on('close', () => {
+    console.log('\n👋 Программа завершена');
     process.exit(0);
-  }
-  
-  const command = args[0].toLowerCase();
-  
-  switch(command) {
-    case 'status':
-      send(0x0B);
-      break;
-      
-    case 'left':
-      const speedLeft = parseInt(args[1]) || 500;
-      const hiLeft = (speedLeft >> 8) & 0xFF;
-      const loLeft = speedLeft & 0xFF;
-      send(0x01, hiLeft, loLeft);
-      isMoving = true;
-      moveDirection = 'left';
-      break;
-      
-    case 'right':
-      const speedRight = parseInt(args[1]) || 500;
-      const hiRight = (speedRight >> 8) & 0xFF;
-      const loRight = speedRight & 0xFF;
-      send(0x02, hiRight, loRight);
-      isMoving = true;
-      moveDirection = 'right';
-      break;
-      
-    case 'stop':
-      send(0x21);
-      isMoving = false;
-      moveDirection = 'none';
-      break;
-      
-    case 'shutter':
-      if (args[1] === 'open') {
-        send(0x03, 0x00, 0x01);
-      } else if (args[1] === 'close') {
-        send(0x04, 0x00, 0x01);
-      }
-      break;
-      
-    case 'ping':
-      send(0x1B);
-      break;
-      
-    default:
-      console.log(`❌ Неизвестная команда: ${command}`);
-  }
-  
-  // Не закрываем порт сразу, чтобы слушать кнопку
-  console.log('\n👂 Ожидание нажатия зеленой кнопки...');
-  console.log('🟢 Когда зеленая кнопка нажата, каретка поедет до конца в противоположную сторону');
 });
