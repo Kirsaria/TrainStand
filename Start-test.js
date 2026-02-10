@@ -17,7 +17,7 @@ let SystemState = {
     isEmergency: false,
     scenarioState: 'Idle',
     scenarioActive: false,
-    lastScenarioCompleteTime: 0  
+    lastScenarioCompleteTime: 0 
 }
 
 // Функция отправки 
@@ -241,7 +241,7 @@ function startScenario() {
 
     clearAllTimeouts();
 
-    turnLight(false); 
+    turnLight(true); 
 
     if (SystemState.isLeftSensor) {
         console.log('Каретка на левом датчике - двигаю вправо');
@@ -312,7 +312,7 @@ function emergencyStop() {
 
     clearAllTimeouts();
     stopMovement();
-    turnLight(true); 
+    turnLight(false); 
 }
 
 port.on('error', (err) => {
